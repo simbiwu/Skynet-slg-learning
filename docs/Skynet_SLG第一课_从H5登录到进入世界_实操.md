@@ -1524,13 +1524,6 @@ fi
 if [[ ! -s protocol/game.pb || protocol/game.proto -nt protocol/game.pb ]]; then
     ./scripts/linux/build_protocol.sh
 fi
-if [[ -f protocol/commands.json ]] && {
-    [[ ! -s lualib/protocol/generated_commands.lua ]]
-    || [[ ! -s client/h5/generated_commands.js ]]
-    || [[ protocol/commands.json -nt lualib/protocol/generated_commands.lua ]]
-}; then
-    ./scripts/linux/build_protocol.sh
-fi
 exec ./third_party/skynet/skynet "$CONFIG_PATH"
 ```
 
@@ -1567,7 +1560,7 @@ exec python3 -m http.server 18080 --bind 127.0.0.1
 </html>
 ```
 
-新建 `client/h5/app.js`，完整仓库路径：`client/h5/app.js`。这一个文件先放 Login 所需的浏览器编码，稍后 EnterWorld 扩展时再拆出共用 Codec；现在不需要 `common.js`、WorldObject Reader 或坐标表单。
+新建 `client/h5/app.js`，完整仓库路径：`client/h5/app.js`。这一个文件先放 Login 所需的浏览器编码，稍后 EnterWorld 扩展时再把协议读写放进顶层 `protocol/h5_dual_protocol_codec.mjs`；现在不需要 WorldObject Reader 或坐标表单。
 
 ```javascript
 // 仓库路径：client/h5/app.js
@@ -2095,7 +2088,7 @@ end)
 
 ### PlayerAgent 增加 EnterWorld 和 QueryWorld
 
-PlayerAgent 将按内部 Command ID 分发已解析的 Lua 请求。Login 阶段只有一个命令，手写布局有助于看清 Header 与 Body；从 EnterWorld 开始，不再为每个命令在 Server、H5、Node 三处重复手写同一套字段编解码。先用一份协议清单定义命令号、Protobuf 消息名与自定义二进制 Body 的字段顺序；后面两个端口各自按这份清单选 Codec，PlayerAgent 只处理普通 Lua Table。`game.proto` 仍是 Protobuf 字段号的权威定义；两种格式的业务字段含义由协议测试对照检查。
+PlayerAgent 将按内部 Command ID 分发已解析的 Lua 请求。Login 阶段只有一个命令，手写布局有助于看清 Header 与 Body；从 EnterWorld 开始，不再为每个命令在 Server、H5、Node 三处重复手写同一套字段编解码。先用一份协议清单定义命令号、Protobuf 消息名与自定义二进制 Body 的字段顺序；后面两个端口各自按这份清单选 Codec，PlayerAgent 只处理普通 Lua Table。`game.proto` 仍是 Protobuf 字段号的权威定义；构建脚本检查两份源文件的字段名称、类型和顺序，协议测试再检查实际字节。
 
 新建 `protocol/commands.json`。`u32` 是 4 字节大端无符号整数，`str` 是 2 字节大端长度加 UTF-8 字节，`?T` 是 1 字节 Presence 加可选值，`[]T` 是 2 字节数量加重复值。结构按列出的字段顺序编码；当前只用到这些类型，后续确实需要其他类型时再扩展通用 Codec。
 
@@ -2118,13 +2111,22 @@ PlayerAgent 将按内部 Command ID 分发已解析的 Lua 请求。Login 阶段
 
 命令号发布后不能复用；自定义二进制字段顺序同样属于已发布协议，插入、删除或改类型都要先处理版本兼容。构建脚本从这份 JSON 生成 Lua 与 JavaScript 可直接加载的协议资料，普通 Server 启动不解析 JSON、不生成代码。它只描述 Wire Contract，不决定业务 Owner。
 
-新建 `scripts/linux/generate_commands.mjs`。它在构建期校验重复命令号和字段类型，再生成两种语言的只读资料。输出是生成文件，不手工编辑；新增命令时只编辑 `commands.json` 并重新构建。
+从这里开始整理协议模块。Login 阶段为了先观察真实收发，已有 `lualib/protocol/` 和 `scripts/linux/` 下的协议文件；它们已经完成任务，不要求你回头重做 Login。现在把协议源、构建工具、生成物和两端编解码放进顶层 `protocol/`。目录名说明它们属于同一个协议模块，文件名再说明 Protobuf／自定义二进制、Server／H5 以及具体职责。接下来的迁移直到第 17 节完成后再启动 Server；不要在文件只移动了一半时运行。
 
-完整仓库路径：`scripts/linux/generate_commands.mjs`
+新建 `protocol/compile_protobuf.lua`，内容与第 11 节的 `scripts/linux/compile_proto.lua` 完全相同，只把首行路径注释改为 `protocol/compile_protobuf.lua`。它仍把 Descriptor 写到 `protocol/game.pb`；编译过程不进入运行中的 Service。
+
+新建 `protocol/generate_commands.mjs`。它在构建期校验重复命令号、字段类型，以及 `commands.json` 与 `game.proto` 的业务字段是否一致，再生成两种语言的只读资料。构建期从第 7 节已安装的 `client/h5/node_modules` 加载固定版本的 protobufjs；如果依赖尚未装好，先在 WSL 用 Linux Node 运行 `npm ci --prefix client/h5`。输出是生成文件，不手工编辑；新增命令时编辑两份协议源文件并重新构建。
+
+完整仓库路径：`protocol/generate_commands.mjs`
 
 ```javascript
-// 仓库路径：scripts/linux/generate_commands.mjs
+// 仓库路径：protocol/generate_commands.mjs
 import { readFile, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+
+// protobufjs 依赖锁在 client/h5/package-lock.json；构建期借用同一版本解析 Proto。
+const requireH5 = createRequire(new URL("../client/h5/package.json", import.meta.url));
+const protobuf = requireH5("protobufjs");
 
 const schema = JSON.parse(await readFile("protocol/commands.json", "utf8"));
 const ids = new Set();
@@ -2153,6 +2155,37 @@ for (const fields of Object.values(schema.types)) {
   }
 }
 
+// 两份源文件必须描述同一批业务字段。Protobuf Field Number 由 game.proto
+// 决定，自定义二进制顺序由 commands.json 决定；这里只校验名称、类型与顺序。
+const protoText = await readFile("protocol/game.proto", "utf8");
+const protoRoot = protobuf.parse(protoText, { keepCase: true }).root;
+protoRoot.resolveAll();
+function checkProtoMessage(messageName, binaryFields) {
+  const protoType = protoRoot.lookupType(messageName.replace(/^\./, ""));
+  const protoFields = [...protoType.fieldsArray].sort((a, b) => a.id - b.id);
+  if (protoFields.length !== binaryFields.length)
+    throw new Error(`${messageName}: field count differs from commands.json`);
+  for (let index = 0; index < binaryFields.length; index++) {
+    const [fieldName, binaryType] = binaryFields[index];
+    const protoField = protoFields[index];
+    const repeated = binaryType.startsWith("[]");
+    const base = binaryType.replace(/^(\?|\[\])/, "");
+    const expectedType = base === "u32" ? "uint32"
+      : base === "str" ? "string" : base;
+    if (protoField.name !== fieldName || protoField.type !== expectedType
+        || protoField.repeated !== repeated) {
+      throw new Error(`${messageName}.${fieldName}: Proto and binary layout differ`);
+    }
+  }
+}
+for (const [typeName, fields] of Object.entries(schema.types)) {
+  checkProtoMessage(`slg.${typeName}`, fields);
+}
+for (const definition of schema.commands) {
+  checkProtoMessage(definition.request_pb, definition.request);
+  checkProtoMessage(definition.response_pb, definition.response);
+}
+
 // 协议清单只允许 ASCII 字段名和类型名；JSON 字符串转为 Lua 字符串。
 function luaLiteral(value) {
   if (value === null) throw new Error("null is not a schema value");
@@ -2170,46 +2203,46 @@ function luaLiteral(value) {
   throw new Error("unsupported schema value");
 }
 
-await writeFile("lualib/protocol/generated_commands.lua",
-  `-- 由 scripts/linux/generate_commands.mjs 生成；不要手改。\nreturn ${luaLiteral(schema)}\n`);
-await writeFile("client/h5/generated_commands.js",
-  `// 由 scripts/linux/generate_commands.mjs 生成；不要手改。\nexport default ${JSON.stringify(schema)};\n`);
+await writeFile("protocol/generated_server_commands.lua",
+  `-- 由 protocol/generate_commands.mjs 生成；不要手改。\nreturn ${luaLiteral(schema)}\n`);
+await writeFile("protocol/generated_h5_commands.mjs",
+  `// 由 protocol/generate_commands.mjs 生成；不要手改。\nexport default ${JSON.stringify(schema)};\n`);
 console.log("COMMAND_SCHEMA_BUILD_OK");
 ```
 
-用下面版本替换现有的 `scripts/linux/build_protocol.sh`，让 Descriptor 和命令资料共用一次构建入口。
+新建 `protocol/build.sh`，让 Descriptor 和命令资料共用一次构建入口。第 11 节的旧构建入口暂时留着，下面会更新启动脚本引用，再删除旧文件。
 
-完整仓库路径：`scripts/linux/build_protocol.sh`
+完整仓库路径：`protocol/build.sh`
 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-node scripts/linux/generate_commands.mjs
-./third_party/skynet/3rd/lua/lua scripts/linux/compile_proto.lua
+node protocol/generate_commands.mjs
+./third_party/skynet/3rd/lua/lua protocol/compile_protobuf.lua
 test -s protocol/game.pb
-test -s lualib/protocol/generated_commands.lua
-test -s client/h5/generated_commands.js
+test -s protocol/generated_server_commands.lua
+test -s protocol/generated_h5_commands.mjs
 ```
 
-此时重新运行 `./scripts/linux/build_protocol.sh`。你在第 11 节已创建的 `game.pb` 会重建，Login 编解码文件暂时保留；下面才让新增世界业务使用生成的命令资料。
+先执行 `chmod +x protocol/build.sh`。第 15 节给 `game.proto` 加上世界消息后再运行构建；此刻保留已能工作的 Login，不在 Proto 尚未扩展时启动新协议模块。
 
 这两个命令资料文件与 `game.pb` 一样由构建脚本生成。在仓库根目录的 `.gitignore` 末尾增加：
 
 ```gitignore
-lualib/protocol/generated_commands.lua
-client/h5/generated_commands.js
+protocol/generated_server_commands.lua
+protocol/generated_h5_commands.mjs
 ```
 
-用下面版本替换第 11 节的 `lualib/protocol/command.lua`。
+新建 `protocol/server_commands.lua`；它在协议迁移完成后取代第 11 节的 `lualib/protocol/command.lua`。
 
-完整仓库路径：`lualib/protocol/command.lua`
+完整仓库路径：`protocol/server_commands.lua`
 
 ```lua
--- 仓库路径：lualib/protocol/command.lua
+-- 仓库路径：protocol/server_commands.lua
 -- 运行期加载构建产物；Server 不解析 JSON，也不动态生成代码。
 -- 同一份资料给两个 Wire Codec 提供命令号、消息名和二进制布局。
-local schema = require "protocol.generated_commands"
+local schema = require "protocol.generated_server_commands"
 local M = { types = schema.types }
 local by_id = {}
 for _, definition in ipairs(schema.commands) do
@@ -2236,7 +2269,7 @@ return M
 -- 不拥有 City 坐标，也不解析 WebSocket/Protobuf。
 local skynet = require "skynet"
 local queue = require "skynet.queue"
-local command = require "protocol.command"
+local command = require "protocol.server_commands"
 
 local CMD = {}
 local REQUEST = {}
@@ -2474,20 +2507,45 @@ EnterWorld 的内部路径已接到同一个 PlayerAgent。接下来扩展第 11
 
 ## 15. 在现有连接上扩展 EnterWorld 和 QueryWorld
 
-Login 已经能从 H5 通过两个端口到达同一业务函数。现在只扩展新业务需要的字段和分发，不再创建一套 Gateway。`service/gateway/websocket_gateway.lua`、`config/game.lua` 和启动脚本保持第 11 节的版本；WorldMgr 在第 16 节装配进 Main。
+Login 已经能从 H5 通过两个端口到达同一业务函数。现在扩展世界业务，并完成上一节开始的协议目录迁移。Gateway 的监听与连接分配保持原样；`config/game.lua` 和启动脚本只改模块搜索路径与构建入口。WorldMgr 在第 16 节装配进 Main。
 
 ### 给两个端口增加世界业务字段
 
-Gateway 已经把监听端口对应的 `protocol_mode` 传给 ConnectionWorker，Login 的两个协议模块也已通过 `wire.lua` 汇合。下面只扩展 EnterWorld 和 QueryWorld 所需的消息类型、Body 字段与命令分发。
+Gateway 已经把监听端口对应的 `protocol_mode` 传给 ConnectionWorker。Login 阶段的两个协议模块通过旧的 `wire.lua` 汇合；本节把它们移到 `protocol/` 并命名为 `server_protobuf_codec.lua`、`server_custom_binary_codec.lua` 和 `server_protocol_dispatch.lua`。`server_` 表示 Skynet 进程加载；第 17 节的 `h5_dual_protocol_codec.mjs` 由浏览器和 Node E2E 加载。`protocol_dispatch` 只按端口选协议，具体 Header／Body 由对应协议文件处理。
 
 | 文件（均相对于 `~/workspace/skynet-slg-server`） | 运行时机与职责 |
 |---|---|
-| `protocol/commands.json`、`lualib/protocol/command.lua` | 前者是命令号、Protobuf 类型映射和自定义二进制布局的源；后者加载构建得到的 Lua 资料，供两个端口共用。 |
+| `protocol/commands.json`、`protocol/server_commands.lua` | 前者是命令号、Protobuf 类型映射和自定义二进制布局的源；后者加载构建得到的 Lua 资料，供两个端口共用。 |
 | `protocol/game.proto` | Protobuf Schema 源文件；规定 `8890` 的 Envelope 和业务消息字段。H5/Node 也用它建立消息类型。 |
-| `scripts/linux/generate_commands.mjs`、`scripts/linux/compile_proto.lua`、`scripts/linux/build_protocol.sh` | 只在构建阶段运行；生成 `protocol/game.pb`、`lualib/protocol/generated_commands.lua` 与 `client/h5/generated_commands.js`。 |
-| `lualib/protocol/protobuf_wire.lua` | 只服务 `8890`；加载 `game.pb`，读写 Protobuf Envelope 和各命令 Body。 |
-| `lualib/protocol/custom_binary_wire.lua` | 只服务 `8891`；读写 8 字节 Header 和各命令的自定义 Body，不加载 Protobuf。 |
-| `lualib/protocol/wire.lua` | 两种协议共用的分发入口；按监听端口选择协议模块，返回同形的内部请求。 |
+| `protocol/generate_commands.mjs`、`protocol/compile_protobuf.lua`、`protocol/build.sh` | 只在构建阶段运行；生成 `protocol/game.pb`、`protocol/generated_server_commands.lua` 与 `protocol/generated_h5_commands.mjs`。 |
+| `protocol/server_protobuf_codec.lua` | 只服务 `8890`；加载 `game.pb`，读写 Protobuf Envelope 和各命令 Body。 |
+| `protocol/server_custom_binary_codec.lua` | 只服务 `8891`；读写 8 字节 Header 和各命令的自定义 Body，不加载 Protobuf。 |
+| `protocol/server_protocol_dispatch.lua` | 两种协议共用的分发入口；按监听端口选择协议模块，返回同形的内部请求。 |
+| `protocol/h5_dual_protocol_codec.mjs` | 第 17 节由 H5 与 Node E2E 共用；按连接模式编解码两个端口的完整 Packet，页面按钮不直接操作字节。 |
+
+先让 Skynet 能从顶层目录加载 `protocol.server_*`。在 `config/game.lua` 的 `lua_path` 开头加一项，其他配置保持不变：
+
+```lua
+-- 仓库路径：config/game.lua；只替换 lua_path 的第一行。
+lua_path = root .. "?.lua;" .. root .. "lualib/?.lua;" .. root .. "lualib/?/init.lua;"
+    .. root .. "third_party/lua-protobuf-runtime/lualib/?.lua;"
+    .. skynet_root .. "lualib/?.lua;" .. skynet_root .. "lualib/?/init.lua"
+```
+
+`require "protocol.server_commands"` 因此从工程根目录找到 `protocol/server_commands.lua`。此处只改 Lua 模块定位，不改变 Service 文件的位置或 Gateway 的端口。将 `scripts/linux/run_server.sh` 中调用 `./scripts/linux/build_protocol.sh` 的一处改为 `./protocol/build.sh`，并在 `exec` 启动 Skynet 前加入生成文件检查：
+
+```bash
+# 仓库路径：scripts/linux/run_server.sh；新增于 exec 之前。
+if [[ -f protocol/commands.json ]] && {
+    [[ ! -s protocol/generated_server_commands.lua ]]
+    || [[ ! -s protocol/generated_h5_commands.mjs ]]
+    || [[ protocol/commands.json -nt protocol/generated_server_commands.lua ]]
+}; then
+    ./protocol/build.sh
+fi
+```
+
+`run_server.sh` 前面的 `game.proto` 检查仍保留，只是其中的构建命令改成 `./protocol/build.sh`。完成本节构建后，文件齐全时不会重复构建。
 
 以 EnterWorld 为例：玩家先用第 11 节的 Login 连接登录，再发送空 Body 的 EnterWorld。两个端口解码后都把相同的内部命令和空 Table 交给 PlayerAgent；它向 WorldMgr 请求主城。返回值先是普通 Lua Table，ConnectionWorker 再按原端口编码。QueryWorld 同理，只是 Request 多了矩形坐标。
 
@@ -2573,17 +2631,17 @@ message Envelope {
 }
 ```
 
-第 11 节已建立 Descriptor 构建脚本。现在 Schema 增加了世界消息，在工程根目录重新执行 ./scripts/linux/build_protocol.sh，让 Server 和 H5 使用同一版本。
+第 11 节已建立 Descriptor 构建脚本。现在 Schema 增加了世界消息，在工程根目录重新执行 ./protocol/build.sh，让 Server 和 H5 使用同一版本。
 
-用下面版本替换第 11 节的 `lualib/protocol/protobuf_wire.lua`。命令号到 Protobuf 消息类型的映射从 `protocol/commands.json` 读取，后续新增命令不再修改这个模块。
+新建 `protocol/server_protobuf_codec.lua`，取代第 11 节的 `lualib/protocol/protobuf_wire.lua`。命令号到 Protobuf 消息类型的映射来自构建后的命令资料，后续新增命令不再修改这个模块。
 
-完整仓库路径：`lualib/protocol/protobuf_wire.lua`
+完整仓库路径：`protocol/server_protobuf_codec.lua`
 
 ```lua
--- 仓库路径：lualib/protocol/protobuf_wire.lua
+-- 仓库路径：protocol/server_protobuf_codec.lua
 -- 每个 ConnectionWorker Lua State 加载自己的 Descriptor；本模块只处理 8890。
 local pb = require "pb"
-local command = require "protocol.command"
+local command = require "protocol.server_commands"
 local M = { FLAG_RESPONSE = 1, MAX_PACKET_BYTES = 64 * 1024 }
 assert(pb.loadfile("protocol/game.pb"))
 
@@ -2619,15 +2677,15 @@ return M
 
 这一模块不访问 Socket、业务 Service 或玩家状态。`game.proto` 只定义 Protobuf 端口的字节布局；自定义二进制端口复用业务字段含义，但不加载 `pb`。
 
-自定义二进制 Header 的格式不变；以下完整版本将 Header 与通用 Body 编解码保存在同一个 `8891` 模块。用它替换第 11 节的 `lualib/protocol/custom_binary_wire.lua`。Login 的字节布局保持不变；EnterWorld、QueryWorld 的字段顺序来自 `commands.json`，新增普通命令不再改本模块。
+自定义二进制 Header 的格式不变；以下完整版本将 Header 与通用 Body 编解码保存在同一个 `8891` 模块。新建 `protocol/server_custom_binary_codec.lua`，取代第 11 节的 `lualib/protocol/custom_binary_wire.lua`。Login 的字节布局保持不变；EnterWorld、QueryWorld 的字段顺序来自 `commands.json`，新增普通命令不再改本模块。
 
-完整仓库路径：`lualib/protocol/custom_binary_wire.lua`
+完整仓库路径：`protocol/server_custom_binary_codec.lua`
 
 ```lua
--- 仓库路径：lualib/protocol/custom_binary_wire.lua
+-- 仓库路径：protocol/server_custom_binary_codec.lua
 -- 只用于 8891；Header 和 Body 在本文件按接收顺序解析。WebSocket Frame 已由
 -- third_party/skynet/lualib/http/websocket.lua 解析。
-local command = require "protocol.command"
+local command = require "protocol.server_commands"
 local M = {}
 
 M.VERSION = 1
@@ -2794,13 +2852,48 @@ return M
 
 `string.pack(">I1I1I2I4", ...)` 中的 `>` 指定 Big-Endian，`I1/I2/I4` 分别是 1、2、4-byte Unsigned Integer。`string.unpack` 最后返回下一字节的位置，本例是 9，因此 `data:sub(body_offset)` 得到 Body。本模块不加载 `pb`。
 
-`lualib/protocol/wire.lua` 沿用第 11 节的版本。它仍只根据监听端口选择 `protobuf_wire` 或 `custom_binary_wire`，不按业务命令增加分支。两种协议模块按生成的命令资料选择 Body 类型或布局。`wire.lua` 加载 `protobuf_wire` 时会在当前 ConnectionWorker Lua State 加载 Descriptor；即使该 Worker 只接收二进制连接也会加载一次。本课先保留这种装配，有实测压力后再考虑按模式延迟加载。
+新建 `protocol/server_protocol_dispatch.lua`，把第 11 节 `lualib/protocol/wire.lua` 的共用选择逻辑迁过来。这个模块只按监听端口给出的模式选择协议，不按业务 Command 分支。两个协议模块按生成的命令资料解释 Body。
 
-今后新增一个普通命令，协议侧只编辑 `protocol/commands.json` 与 `protocol/game.proto`，运行一次 `./scripts/linux/build_protocol.sh`；业务侧在对应状态 Owner 注册并实现处理，客户端增加实际操作和必要测试。现有的 Gateway、ConnectionWorker、`wire.lua`、两个协议模块和 `client/h5/common.js` 不因命令数增加而修改。若新字段超出当前 `u32`、`str`、可选值、数组和结构的能力，先扩展通用 Codec 并说明兼容规则；这属于扩展字段类型，不是每条命令重复写编解码。
+完整仓库路径：`protocol/server_protocol_dispatch.lua`
+
+```lua
+-- 仓库路径：protocol/server_protocol_dispatch.lua
+-- ConnectionWorker 传入监听端口决定的模式；不根据收到的字节猜协议。
+local protobuf_codec = require "protocol.server_protobuf_codec"
+local custom_binary_codec = require "protocol.server_custom_binary_codec"
+local M = {}
+
+-- message 是一个完整的 WebSocket Binary Message；返回含 request 的内部包。
+-- 两个 Codec 均为纯编解码函数，不跨 Service，也不会 yield。
+function M.decode_request(protocol_mode, message)
+    if protocol_mode == "protobuf" then
+        return protobuf_codec.decode_request(message)
+    elseif protocol_mode == "binary" then
+        return custom_binary_codec.decode_request(message)
+    end
+    error("unknown protocol mode")
+end
+
+-- response 是 PlayerAgent 返回的普通 Lua Table；编码结果由原连接写回。
+function M.encode_response(protocol_mode, command_id, sequence, response)
+    if protocol_mode == "protobuf" then
+        return protobuf_codec.encode_response(command_id, sequence, response)
+    elseif protocol_mode == "binary" then
+        return custom_binary_codec.encode_response(command_id, sequence, response)
+    end
+    error("unknown protocol mode")
+end
+
+return M
+```
+
+`server_protocol_dispatch.lua` 加载 `server_protobuf_codec.lua` 时会在当前 ConnectionWorker Lua State 加载 Descriptor；即使该 Worker 只接收自定义二进制连接也会加载一次。本课先保留这种装配，有实测压力后再考虑按模式延迟加载。
+
+今后新增一个普通命令，协议侧只编辑 `protocol/commands.json` 与 `protocol/game.proto`，运行一次 `./protocol/build.sh`；业务侧在对应状态 Owner 注册并实现处理，客户端增加实际操作和必要测试。现有的 Gateway、ConnectionWorker、`server_protocol_dispatch.lua`、两个协议模块和 `protocol/h5_dual_protocol_codec.mjs` 不因命令数增加而修改。若新字段超出当前 `u32`、`str`、可选值、数组和结构的能力，先扩展通用 Codec 并说明兼容规则；这属于扩展字段类型，不是每条命令重复写编解码。
 
 ### ConnectionWorker 转发已登录的世界请求
 
-用下面版本替换第 11 节的 `service/gateway/connection_worker.lua`，保留 Login 路径，增加对已登录请求的 Agent 通用转发。这是第一课从“只完成 Login”到“接入层完整转发能力”的一次修改；后续增加普通业务命令时不再修改 Gateway 或 ConnectionWorker。已有的 `Connection` Table 增加 `addr`、`player_id`，字段 `mode` 在本版明确命名为 `protocol_mode`。`wire.decode_request` 仍返回 `{ version, flags, command, sequence, body, request }`；`request` 的字段由命令决定：Login 为 `{ player_id, token }`，EnterWorld 为 `{}`，QueryWorld 为 `{ min_x, min_y, max_x, max_y }`。业务返回统一以 `{ code, message, ... }` 表示，成功响应再带该命令的结果字段；等待期间连接失效可以返回 `nil`，这表示不再发送响应。
+用下面版本替换第 11 节的 `service/gateway/connection_worker.lua`，保留 Login 路径，增加对已登录请求的 Agent 通用转发。这是第一课从“只完成 Login”到“接入层完整转发能力”的一次修改；后续增加普通业务命令时不再修改 Gateway 或 ConnectionWorker。已有的 `Connection` Table 增加 `addr`、`player_id`，字段 `mode` 在本版明确命名为 `protocol_mode`。`protocol_dispatch.decode_request` 仍返回 `{ version, flags, command, sequence, body, request }`；`request` 的字段由命令决定：Login 为 `{ player_id, token }`，EnterWorld 为 `{}`，QueryWorld 为 `{ min_x, min_y, max_x, max_y }`。业务返回统一以 `{ code, message, ... }` 表示，成功响应再带该命令的结果字段；等待期间连接失效可以返回 `nil`，这表示不再发送响应。
 
 完整仓库路径：`service/gateway/connection_worker.lua`
 
@@ -2810,8 +2903,8 @@ return M
 -- Service 的独立 coroutine 中读一条连接；Service 不绑定固定 OS Thread。
 local skynet = require "skynet"
 local websocket = require "http.websocket"
-local command = require "protocol.command"
-local wire = require "protocol.wire"
+local command = require "protocol.server_commands"
+local protocol_dispatch = require "protocol.server_protocol_dispatch"
 
 local CMD = {}
 local handle = {}
@@ -2869,7 +2962,7 @@ end
 -- Response 按连接固定协议编码；只捕获接入边界的编码/写入错误并记日志。
 local function write_response(connection, command_id, sequence, response)
     local encode_ok, packet_or_error = pcall(
-        wire.encode_response, connection.protocol_mode,
+        protocol_dispatch.encode_response, connection.protocol_mode,
         command_id, sequence, response)
     if not encode_ok then
         skynet.error("[ConnectionWorker] encode failed command=", command_id,
@@ -2958,7 +3051,7 @@ local function login(connection, request)
     }
 end
 
--- handle.message 传入当前连接、wire.decode_request 的 Header/Envelope 字段
+-- handle.message 传入当前连接、protocol_dispatch.decode_request 的 Header/Envelope 字段
 -- 与 request Table；未登录只准 Login，成功后交给 PlayerAgent。
 -- 返回业务 Response Table 或 nil；转发到 Agent 时 skynet.call 会 yield。
 local function dispatch_packet(connection, header, request)
@@ -3027,7 +3120,7 @@ function handle.message(fd, message, message_type)
     end
 
     local decode_ok, header_or_error = pcall(
-        wire.decode_request, connection.protocol_mode, message)
+        protocol_dispatch.decode_request, connection.protocol_mode, message)
     if not decode_ok then
         skynet.error("[ConnectionWorker] wire decode failed fd=", fd,
             " error=", header_or_error)
@@ -3245,13 +3338,13 @@ ss -lntp | grep -E ':(8890|8891|8000)\b'
 
 ## 17. 在 H5 中加入 EnterWorld 和 QueryWorld
 
-新建 `client/h5/common.js`。
+新建 `protocol/h5_dual_protocol_codec.mjs`。
 
-完整仓库路径：`client/h5/common.js`
+完整仓库路径：`protocol/h5_dual_protocol_codec.mjs`
 
 ```javascript
-// 仓库路径：client/h5/common.js
-import generatedSchema from "./generated_commands.js";
+// 仓库路径：protocol/h5_dual_protocol_codec.mjs
+import generatedSchema from "./generated_h5_commands.mjs";
 export const VERSION = 1;
 export const FLAG_RESPONSE = 0x01;
 export const HEADER_SIZE = 8;
@@ -3339,7 +3432,7 @@ export function decodePacket(protocolMode, arrayBuffer, Envelope) {
   };
 }
 
-// 自定义二进制 Body 与 lualib/protocol/custom_binary_wire.lua 使用相同字段顺序。
+// 自定义二进制 Body 与 protocol/server_custom_binary_codec.lua 使用相同字段顺序。
 // 所有读取先校验剩余长度，避免坏包被 JS DataView 的异常误认为业务错误。
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -3554,7 +3647,7 @@ export function appendLog(element, message) {
 </html>
 ```
 
-用下面版本替换第 11 节的 `client/h5/app.js`；协议读写移到刚创建的 `common.js`，同一连接在 Login 成功后继续发世界请求。
+用下面版本替换第 11 节的 `client/h5/app.js`；协议读写移到刚创建的 `h5_dual_protocol_codec.mjs`，同一连接在 Login 成功后继续发世界请求。
 
 完整仓库路径：`client/h5/app.js`
 
@@ -3568,7 +3661,7 @@ import {
   decodePacket,
   encodeBinaryRequest,
   encodePacket,
-} from "./common.js";
+} from "../../protocol/h5_dual_protocol_codec.mjs";
 
 const logElement = document.querySelector("#log");
 const loginButton = document.querySelector("#login");
@@ -3779,16 +3872,30 @@ ver flg cmd    sequence
 
 Protobuf 端口的首字节是 Protobuf Field Tag，不是上述固定 Header。Chrome 展示的是 WebSocket Payload；WebSocket Frame Header 已由浏览器隐藏。Server `handle.message` 收到的 `message` 与这里的 Payload 相同。
 
+两端口的 Login、EnterWorld、QueryWorld 都已从新目录跑通后，删除第 11 节留下的旧协议入口。命令只列出本次迁移取代的文件，不删除其他 `lualib` 或 `scripts/linux` 内容：
+
+```bash
+rm -f lualib/protocol/command.lua \
+  lualib/protocol/protobuf_wire.lua \
+  lualib/protocol/custom_binary_wire.lua \
+  lualib/protocol/wire.lua \
+  scripts/linux/compile_proto.lua \
+  scripts/linux/build_protocol.sh
+```
+
+`protocol/` 此时同时保存手写的 `game.proto`、`commands.json`、构建工具、生成资料和按运行端命名的编解码器。`service/gateway/` 只管连接生命周期，`client/h5/app.js` 只管页面行为；查协议问题不需要在这三个目录之间寻找字段定义。`.mjs` 后缀让位于 `client/h5` 包目录之外的 H5 共用模块在 Node E2E 中仍按 ES Module 加载。
+
 ## 18. 写协议 Unit Test 和真实 WebSocket E2E
 
-新建 `tests/protocol/test_wire.lua`。
+新建 `tests/protocol/test_server_protocol_dispatch.lua`。
 
-完整仓库路径：`tests/protocol/test_wire.lua`
+完整仓库路径：`tests/protocol/test_server_protocol_dispatch.lua`
 
 ```lua
--- 仓库路径：tests/protocol/test_wire.lua
+-- 仓库路径：tests/protocol/test_server_protocol_dispatch.lua
 -- bundled Lua 直接运行，不创建 Skynet Process。
 package.path = table.concat({
+    "./?.lua",
     "./lualib/?.lua",
     "./lualib/?/init.lua",
     "./third_party/lua-protobuf-runtime/lualib/?.lua",
@@ -3801,10 +3908,10 @@ package.cpath = table.concat({
 }, ";")
 
 local pb = require "pb"
-local command = require "protocol.command"
-local binary_wire = require "protocol.custom_binary_wire"
-local protobuf_wire = require "protocol.protobuf_wire" -- 加载预编译的 game.pb
-local wire = require "protocol.wire"
+local command = require "protocol.server_commands"
+local binary_codec = require "protocol.server_custom_binary_codec"
+local protobuf_codec = require "protocol.server_protobuf_codec" -- 加载预编译的 game.pb
+local protocol_dispatch = require "protocol.server_protocol_dispatch"
 
 -- 测试失败时带上字段名，区分 Header/Body 哪个值偏离 Wire Contract。
 local function assert_equal(actual, expected, field)
@@ -3827,14 +3934,14 @@ local protobuf_message = assert(pb.encode(".slg.Envelope", {
     version = 1, flags = 0, command = command.LOGIN,
     sequence = 7, body = body,
 }))
-local binary_message = binary_wire.encode(command.LOGIN, 7, 0,
+local binary_message = binary_codec.encode(command.LOGIN, 7, 0,
     string.pack(">I4s2", 10001, "dev:10001"))
 
 for _, entry in ipairs({
     { "protobuf", protobuf_message },
     { "binary", binary_message },
 }) do
-    local value = wire.decode_request(entry[1], entry[2])
+    local value = protocol_dispatch.decode_request(entry[1], entry[2])
     assert_equal(value.version, 1, "version")
     assert_equal(value.command, command.LOGIN, "command")
     assert_equal(value.sequence, 7, "sequence")
@@ -3853,18 +3960,18 @@ local login_response = {
         food = 1000,
     },
 }
-local protobuf_response = wire.encode_response(
+local protobuf_response = protocol_dispatch.encode_response(
     "protobuf", command.LOGIN, 7, login_response)
 local envelope = assert(pb.decode(".slg.Envelope", protobuf_response))
-assert_equal(envelope.flags, protobuf_wire.FLAG_RESPONSE, "protobuf response flag")
+assert_equal(envelope.flags, protobuf_codec.FLAG_RESPONSE, "protobuf response flag")
 local response = assert(pb.decode(".slg.LoginResponse", envelope.body))
 assert_equal(response.code, 0, "response code")
 assert_equal(response.player.player_id, 10001, "response player_id")
 
-local binary_response = wire.encode_response(
+local binary_response = protocol_dispatch.encode_response(
     "binary", command.LOGIN, 7, login_response)
-local binary_header = binary_wire.decode(binary_response)
-assert_equal(binary_header.flags, binary_wire.FLAG_RESPONSE,
+local binary_header = binary_codec.decode(binary_response)
+assert_equal(binary_header.flags, binary_codec.FLAG_RESPONSE,
     "binary response flag")
 local code, message, present, player_id =
     string.unpack(">I4s2I1I4", binary_header.body)
@@ -3873,18 +3980,18 @@ assert_equal(message, "OK", "binary response message")
 assert_equal(present, 1, "binary player presence")
 assert_equal(player_id, 10001, "binary player id")
 
-local enter_request = wire.decode_request("binary",
-    binary_wire.encode(command.ENTER_WORLD, 8, 0, ""))
+local enter_request = protocol_dispatch.decode_request("binary",
+    binary_codec.encode(command.ENTER_WORLD, 8, 0, ""))
 assert_equal(next(enter_request.request), nil, "empty enter request")
-local query_request = wire.decode_request("binary",
-    binary_wire.encode(command.QUERY_WORLD, 9, 0,
+local query_request = protocol_dispatch.decode_request("binary",
+    binary_codec.encode(command.QUERY_WORLD, 9, 0,
         string.pack(">I4I4I4I4", 1, 2, 3, 4)))
 assert_equal(query_request.request.min_x, 1, "binary min_x")
 assert_equal(query_request.request.max_y, 4, "binary max_y")
 
 local city = { object_id = 11, object_type = "CITY",
     owner_player_id = 10001, x = 10, y = 20, version = 1 }
-local enter_response = binary_wire.decode(wire.encode_response("binary",
+local enter_response = binary_codec.decode(protocol_dispatch.encode_response("binary",
     command.ENTER_WORLD, 8, {
         code = 0, message = "OK", player = login_response.player,
         city = city, world = { width = 256, height = 256,
@@ -3892,7 +3999,7 @@ local enter_response = binary_wire.decode(wire.encode_response("binary",
     }))
 assert_equal(enter_response.command, command.ENTER_WORLD,
     "binary enter response command")
-local query_response = binary_wire.decode(wire.encode_response("binary",
+local query_response = binary_codec.decode(protocol_dispatch.encode_response("binary",
     command.QUERY_WORLD, 9, {
         code = 0, message = "OK", objects = { city },
     }))
@@ -3900,56 +4007,56 @@ local _, _, object_count = string.unpack(">I4s2I2", query_response.body)
 assert_equal(object_count, 1, "binary query object count")
 
 assert_error(function()
-    binary_wire.decode("\1\0")
+    binary_codec.decode("\1\0")
 end, "short binary header")
 
 assert_error(function()
-    binary_wire.decode(string.pack(">I1I1I2I4", 2, 0, 1, 1))
+    binary_codec.decode(string.pack(">I1I1I2I4", 2, 0, 1, 1))
 end, "wrong version")
 
 assert_error(function()
-    binary_wire.decode(string.pack(">I1I1I2I4", 1, 0x80, 1, 1))
+    binary_codec.decode(string.pack(">I1I1I2I4", 1, 0x80, 1, 1))
 end, "invalid flags")
 
 assert_error(function()
-    wire.decode_request("binary", binary_wire.encode(999, 1, 0, ""))
+    protocol_dispatch.decode_request("binary", binary_codec.encode(999, 1, 0, ""))
 end, "unknown command")
 
 assert_error(function()
     -- Field 2 是 length-delimited Token；这里声明 5 bytes，实际只有 3 bytes。
-    wire.decode_request("protobuf", assert(pb.encode(".slg.Envelope", {
+    protocol_dispatch.decode_request("protobuf", assert(pb.encode(".slg.Envelope", {
         version = 1, flags = 0, command = command.LOGIN,
         sequence = 1, body = "\18\5abc",
     })))
 end, "malformed protobuf")
 
 assert_error(function()
-    wire.decode_request("binary", binary_wire.encode(command.LOGIN, 1, 0,
+    protocol_dispatch.decode_request("binary", binary_codec.encode(command.LOGIN, 1, 0,
         string.pack(">I4I2", 10001, 5) .. "abc"))
 end, "malformed binary body")
 
 assert_error(function()
-    wire.decode_request("binary", binary_wire.encode(command.ENTER_WORLD, 1, 0,
+    protocol_dispatch.decode_request("binary", binary_codec.encode(command.ENTER_WORLD, 1, 0,
         "unexpected"))
 end, "unexpected binary body")
 
 assert_error(function()
-    wire.decode_request("protobuf", assert(pb.encode(".slg.Envelope", {
+    protocol_dispatch.decode_request("protobuf", assert(pb.encode(".slg.Envelope", {
         version = 2, flags = 0, command = command.LOGIN,
         sequence = 1, body = body,
     })))
 end, "wrong protobuf version")
 
 assert_error(function()
-    wire.decode_request("binary", string.rep("x", 64 * 1024 + 1))
+    protocol_dispatch.decode_request("binary", string.rep("x", 64 * 1024 + 1))
 end, "oversized binary packet")
 
 assert_error(function()
-    wire.decode_request("protobuf", binary_message)
+    protocol_dispatch.decode_request("protobuf", binary_message)
 end, "binary payload on protobuf port")
 
 assert_error(function()
-    wire.decode_request("binary", protobuf_message)
+    protocol_dispatch.decode_request("binary", protobuf_message)
 end, "protobuf payload on binary port")
 
 print("DUAL_PROTOCOL_WIRE_TEST_OK")
@@ -3958,7 +4065,7 @@ print("DUAL_PROTOCOL_WIRE_TEST_OK")
 执行：
 
 ```bash
-./third_party/skynet/3rd/lua/lua tests/protocol/test_wire.lua
+./third_party/skynet/3rd/lua/lua tests/protocol/test_server_protocol_dispatch.lua
 ```
 
 新建 `client/h5/e2e.mjs`。
@@ -3971,7 +4078,7 @@ import WebSocket from "ws";
 import protobuf from "protobufjs";
 import { COMMAND, commandDefinition,
   decodeBinaryResponse, decodePacket, encodeBinaryRequest,
-  encodePacket } from "./common.js";
+  encodePacket } from "../../protocol/h5_dual_protocol_codec.mjs";
 
 const root = await protobuf.load("protocol/game.proto");
 const Envelope = root.lookupType("slg.Envelope");
@@ -4245,17 +4352,16 @@ fi
 case "$(command -v npm)" in
     /mnt/*) echo "Windows npm on WSL PATH is not supported" >&2; exit 1 ;;
 esac
-./scripts/linux/build_protocol.sh
-
 if [[ ! -f client/h5/node_modules/protobufjs/dist/protobuf.min.js
     || ! -f client/h5/node_modules/ws/package.json ]]; then
     # npm ci 严格按 package-lock.json 恢复 Dependency。
     npm ci --prefix client/h5
 fi
+./protocol/build.sh
 
 LUA="./third_party/skynet/3rd/lua/lua"
 "$LUA" tests/unit/test_world_math.lua
-"$LUA" tests/protocol/test_wire.lua
+"$LUA" tests/protocol/test_server_protocol_dispatch.lua
 ./tests/integration/websocket_e2e.sh
 
 echo "ALL_TESTS_OK"
@@ -4594,7 +4700,7 @@ chmod +x \
 }
 ```
 
-调试 ConnectionWorker：按 `Ctrl+Shift+D`，选择 `SLG Lua：ConnectionWorker` 并启动，然后在 `service/gateway/connection_worker.lua::handle.message`、`lualib/protocol/wire.lua::decode_request` 下断点。Protobuf 端口继续进入 `protobuf_wire.decode_request`，自定义二进制端口进入 `custom_binary_wire.decode_request`；分别用 Chrome 连接两个端口。
+调试 ConnectionWorker：按 `Ctrl+Shift+D`，选择 `SLG Lua：ConnectionWorker` 并启动，然后在 `service/gateway/connection_worker.lua::handle.message`、`protocol/server_protocol_dispatch.lua::decode_request` 下断点。Protobuf 端口继续进入 `protocol/server_protobuf_codec.lua::decode_request`，自定义二进制端口进入 `protocol/server_custom_binary_codec.lua::decode_request`；分别用 Chrome 连接两个端口。
 
 调试 PlayerAgent 时停止上一轮 Server，选择 `SLG Lua：PlayerAgent`，在 `CMD.load`、`REQUEST.enter_world` 和 `REQUEST.query_world` 下断点。LuaPanda不能通过 Step Into 跨入另一个 Service 的 Lua State；跨 Service 位置要分别选择目标 Service 或配合 Debug Console Trace。
 
@@ -4625,7 +4731,7 @@ service/world/world_mgr.lua
 |---|---|---|---|
 | 1 | Chrome Main Thread，`h5/app.js::request` | Sequence、待完成的 Promise | 等待 Response；不占用 Server coroutine |
 | 2 | Skynet Socket Thread | TCP/WebSocket Byte Stream | C Runtime 收包，不执行 Lua 业务 |
-| 3 | `ConnectionWorker` 的 Lua State，`handle.message` | `fd -> connection` 表、Connection ID、协议模式、绑定的 Agent | `wire.decode_request` 不 yield；调用 Auth、PlayerMgr、Agent 时 yield |
+| 3 | `ConnectionWorker` 的 Lua State，`handle.message` | `fd -> connection` 表、Connection ID、协议模式、绑定的 Agent | `protocol_dispatch.decode_request` 不 yield；调用 Auth、PlayerMgr、Agent 时 yield |
 | 4 | `Auth` Service，`CMD.verify` | 本课的 Token 校验规则 | 不 yield |
 | 5 | `PlayerMgr` Service，`CMD.login` | `player_id -> agent` 路由表和 Login Lock | `skynet.newservice`、`skynet.call(agent, load)` 会 yield |
 | 6 | `PlayerAgent` Service，`CMD.load` | 单个 Player 的持久状态快照 | `skynet.call(StorageMgr, load_player)` 会 yield |
@@ -4640,7 +4746,7 @@ Login 成功后再点击 EnterWorld。路径变为：
 ```text
 h5/app.js::request（按选中的端口编码）
   -> service/gateway/connection_worker.lua::handle.message
-  -> lualib/protocol/wire.lua::decode_request
+  -> protocol/server_protocol_dispatch.lua::decode_request
   -> Protobuf Envelope/Body 或固定 Header/自定义 Body
   -> service/gateway/connection_worker.lua::dispatch_packet
   -> service/player/player_agent.lua::CMD.client_request
@@ -4650,7 +4756,7 @@ h5/app.js::request（按选中的端口编码）
   -> service/storage/storage_mgr.lua::CMD.save_player
   -> service/storage/storage_worker.lua::CMD.save_player
   -> 原路返回 ConnectionWorker
-  -> wire.encode_response（按连接协议）/ websocket.write
+  -> protocol_dispatch.encode_response（按连接协议）/ websocket.write
 ```
 
 `ConnectionWorker` 持有连接状态，`PlayerAgent` 持有玩家持久状态，`RegionWorker` 持有其负责 Region 内的 City 空间状态。`WorldMgr` 只持有 Region 到 Worker 的路由和世界元数据，不复制 City 数据。这样判断一次修改该放在哪里时，可以直接问“谁是这份状态的唯一写入者”。
@@ -4772,7 +4878,7 @@ grep -n 'lua_cpath' config/game.lua
 
 ### `unknown protobuf type` 或 Proto 加载失败
 
-Protobuf 端口的 `lualib/protocol/protobuf_wire.lua` 从 `protocol/game.pb` 加载描述符；H5/Node Client 从 `protocol/game.proto` 建立 Type 映射。先确认已重新运行 `./scripts/linux/build_protocol.sh`，再确认 Package `slg`、Envelope 和业务 Message Name 没有被单边修改：
+Protobuf 端口的 `protocol/server_protobuf_codec.lua` 从 `protocol/game.pb` 加载描述符；H5/Node Client 从 `protocol/game.proto` 建立 Type 映射。先确认已重新运行 `./protocol/build.sh`，再确认 Package `slg`、Envelope 和业务 Message Name 没有被单边修改：
 
 ```bash
 grep -nE 'package |message Envelope|message Login|message EnterWorld|message QueryWorld' protocol/game.proto
@@ -4892,7 +4998,7 @@ git status -sb
 
 ### 练习 4：增加一个 `RenameCity`，代码应放在哪里
 
-答案：在 `protocol/commands.json` 发布 Command ID、Protobuf 消息名与自定义二进制字段顺序，在 `protocol/game.proto` 定义 Protobuf 字段号，重新运行 `build_protocol.sh`；再给目标业务 Owner 增加处理函数和客户端操作。普通新命令不改 Gateway、ConnectionWorker、`wire.lua`、两个协议模块或 H5/Node 的通用 Codec。两种入口转成同一内部请求；PlayerAgent 检查玩家权限和请求顺序。City 名称若属于世界可见状态，由目标 RegionWorker 做唯一写入，再由 PlayerAgent 保存持久状态。不要让 WorldMgr 复制维护名字。若 Region 修改成功而 Storage 失败，本课应明确返回失败并记录可恢复事件；完整一致性策略在后续持久化课程处理，不能用吞错掩盖。
+答案：在 `protocol/commands.json` 发布 Command ID、Protobuf 消息名与自定义二进制字段顺序，在 `protocol/game.proto` 定义 Protobuf 字段号，重新运行 `./protocol/build.sh`；再给目标业务 Owner 增加处理函数和客户端操作。普通新命令不改 Gateway、ConnectionWorker、`protocol/server_protocol_dispatch.lua`、两个协议模块或 H5/Node 的通用 Codec。两种入口转成同一内部请求；PlayerAgent 检查玩家权限和请求顺序。City 名称若属于世界可见状态，由目标 RegionWorker 做唯一写入，再由 PlayerAgent 保存持久状态。不要让 WorldMgr 复制维护名字。若 Region 修改成功而 Storage 失败，本课应明确返回失败并记录可恢复事件；完整一致性策略在后续持久化课程处理，不能用吞错掩盖。
 
 ### 练习 5：为什么 `logical_worker_id = region_id % worker_count` 不能直接拿来索引 Lua Array
 

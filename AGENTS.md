@@ -262,7 +262,7 @@ Storage
 ## H5 / WebSocket / Protobuf rules
 
 - Gateway 和 ConnectionWorker 是接入层：Gateway 负责监听、连接分配与协议模式；ConnectionWorker 负责 WebSocket 生命周期、认证绑定、通用编解码调用和向业务 Owner 转发。新增普通业务 Command 不得修改这两个 Service 的命令分支。新增字段或 Body 布局先修改协议定义并重新构建；只有新增通用字段类型时才扩展 Codec。新增业务处理只修改目标业务 Owner 的分发与实现。确实改变连接生命周期、认证、安全策略或传输协议时，才审查接入层代码。
-- 第一课从 EnterWorld 开始使用 `protocol/commands.json` 作为命令号、Protobuf 消息名和自定义二进制字段布局的发布清单；构建时生成 Lua/JS 命令资料，`game.proto` 仍是 Protobuf Field Number 的权威来源。新增普通命令不再手写 Server/H5/Node 三套同形字段编解码分支，也不改通用 Wire 模块；只扩展协议定义、目标业务 Owner、客户端操作和必要测试。只有新增字段类型时才扩展通用 Codec，并说明兼容性。
+- 第一课从 EnterWorld 开始把协议源、构建工具、生成物和编解码器集中到顶层 `protocol/`；文件名要说明 Server/H5、Protobuf/自定义二进制以及职责。`protocol/commands.json` 是命令号、Protobuf 消息名和自定义二进制字段布局的发布清单；`game.proto` 仍是 Protobuf Field Number 的权威来源。构建时校验两份定义的字段一致性并生成 Lua/JS 命令资料。新增普通命令不再手写 Server/H5/Node 三套同形字段编解码分支，也不改通用协议选择模块；只扩展协议定义、目标业务 Owner、客户端操作和必要测试。只有新增字段类型时才扩展通用 Codec，并说明兼容性。
 - 一个 WebSocket Binary Message 对应一个完整 Application Packet，不再增加 TCP Length Prefix。
 - Gateway/ConnectionWorker 按监听端口处理 WebSocket、Protobuf Envelope/Body 或 Custom Header/Body；两条链路转为同一内部请求，PlayerAgent 不解析外部 Wire Format。
 - ConnectionWorker 持有 fd、连接状态和 generation；PlayerAgent 只持有逻辑 Connection Owner/ID。

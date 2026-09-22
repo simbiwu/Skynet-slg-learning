@@ -245,11 +245,11 @@ Protobuf Descriptor 在构建阶段从 `protocol/game.proto` 生成 `protocol/ga
 
 现场发现 WSL 未安装原生 Node/npm 时，`npm` 仍可能解析到 Windows 的 `/mnt/c/Program Files/nodejs/npm`。第 2、7 节在执行 `npm install` 前检查 `command -v node/npm` 和 `node -p 'process.platform'`；平台必须为 `linux`，npm 路径不能来自 `/mnt/`。否则先在 Ubuntu 安装原生 `nodejs npm`，再生成或恢复 Lock File，避免把 Windows 的安装产物混入 Linux 工程。
 
-## D021 - 第一课协议模块按端口命名
+## D021 - 协议模块统一归顶层 protocol
 
-第一课保留 `service/`、`lualib/`、顶层 `protocol/` 的现有目录结构。协议处理由 `lualib/protocol/protobuf_wire.lua`、`lualib/protocol/custom_binary_wire.lua` 两个端口专属模块和共用的 `lualib/protocol/wire.lua` 完成；EnterWorld 阶段增加由协议清单生成的 `lualib/protocol/generated_commands.lua`。`8890` 的 Envelope 与 Protobuf Body 同处前者；`8891` 的 8 字节 Header 与自定义 Body 同处后者。`wire.lua` 只根据连接的端口模式选择模块，不重复解析字段。两条链路继续产生同形内部请求，业务 Service 不依赖外部字节格式。
+Login 首次跑通后，在 EnterWorld 阶段把协议源、构建工具、生成物和两端编解码集中到顶层 `protocol/`。运行时代码按职责命名为 `server_protobuf_codec.lua`、`server_custom_binary_codec.lua`、`server_protocol_dispatch.lua` 和 `h5_dual_protocol_codec.mjs`；生成资料为 `generated_server_commands.lua` 与 `generated_h5_commands.mjs`。`8890` 的 Envelope 与 Protobuf Body 同处 Server Protobuf 模块；`8891` 的 8 字节 Header 与自定义 Body 同处 Server 自定义二进制模块。共用模块只按连接的端口模式选择 Codec，不重复解析字段。两条链路继续产生同形内部请求，业务 Service 不依赖外部字节格式。
 
-这次调整只改变第一课协议代码的文件组织，不更改两端口的 Wire Contract。`8890` 的 Envelope 与 Body、`8891` 的 Header 与 Body 各自在一个明确命名的模块中。后续新增命令的扩展规则见 D023。
+这次调整不更改两端口的 Wire Contract。学习者先按原文件完成 Login，在 EnterWorld 阶段按教程迁移；验证两端口后删除旧入口，不要求重做已完成的 Login。后续新增命令的扩展规则见 D023。
 
 ## D022 - 普通业务命令不修改 Gateway 和 ConnectionWorker
 
@@ -257,6 +257,6 @@ Gateway 只处理监听、端口模式和连接分配。ConnectionWorker 只处�
 
 ## D023 - 命令资料生成与自定义二进制通用 Body Codec
 
-Login 阶段先手写一个 Body 看清字节布局。增加 EnterWorld 时建立 `protocol/commands.json`，发布 Command ID、Protobuf 消息名和 `8891` Body 的有序字段布局；构建脚本把它生成 Lua 与 JavaScript 可直接加载的命令资料。`game.proto` 继续定义 `8890` 的 Protobuf Field Number。运行期 `protobuf_wire.lua` 用命令资料选 `pb.encode/decode` 的类型，`custom_binary_wire.lua` 用同一资料递归编解码已支持的字段类型；H5 与 Node 复用同一个 JS Codec。新增普通命令时编辑清单、Proto 和业务 Owner，重新构建并补客户端操作与必要测试，不修改 Gateway、ConnectionWorker、通用 Wire 或两种协议模块。要增加新的字段类型或改变连接语义时才修改通用 Codec 或接入层。
+Login 阶段先手写一个 Body 看清字节布局。增加 EnterWorld 时建立 `protocol/commands.json`，发布 Command ID、Protobuf 消息名和 `8891` Body 的有序字段布局；`protocol/build.sh` 生成 Lua 与 JavaScript 可加载的命令资料。`game.proto` 继续定义 `8890` 的 Protobuf Field Number，构建工具解析 Proto 并核对两份源文件的字段名称、类型与顺序。运行期 `server_protobuf_codec.lua` 用命令资料选 `pb.encode/decode` 的类型，`server_custom_binary_codec.lua` 用同一资料递归编解码已支持的字段类型；H5 与 Node 复用 `h5_dual_protocol_codec.mjs`。新增普通命令时编辑清单、Proto 和业务 Owner，重新构建并补客户端操作与必要测试，不修改 Gateway、ConnectionWorker 或通用 Codec。要增加新的字段类型或改变连接语义时才修改通用 Codec 或接入层。
 
-自定义二进制的字段顺序、整数宽度、Presence 和数组长度都是公开的 Wire Contract；已发布版本不能静默改变。生成工具必须检查重复 ID 和类型；协议与真实 WebSocket 测试检查两端语义一致。构建产物不由普通 Service 启动时动态生成。
+自定义二进制的字段顺序、整数宽度、Presence 和数组长度都是公开的 Wire Contract；已发布版本不能静默改变。生成工具检查重复 ID、字段类型及两份协议定义的一致性；协议与真实 WebSocket 测试检查两端语义一致。构建产物不由普通 Service 启动时动态生成。
